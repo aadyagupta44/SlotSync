@@ -1,0 +1,81 @@
+# SlotSync local stack.  `docker compose up --build` brings up everything.
+name: slotsync
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-slotsync}
+      POSTGRES_USER: ${POSTGRES_USER:-slotsync}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-slotsync}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-slotsync} -d ${POSTGRES_DB:-slotsync}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Redpanda is a drop-in Kafka replacement - same protocol, one container,
+  # no ZooKeeper. Anything that speaks Kafka speaks to this.
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-slotsync}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-slotsync}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-slotsync}
+      SPRING_DATA_REDIS_URL: redis://redis:6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      SLOTSYNC_OFFER_TTL_SECONDS: ${SLOTSYNC_OFFER_TTL_SECONDS:-300}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

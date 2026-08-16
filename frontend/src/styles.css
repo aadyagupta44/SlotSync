@@ -1,0 +1,1266 @@
+/* ===========================================================================
+   SlotSync — operations console
+   ---------------------------------------------------------------------------
+   Design intent: this is an instrument panel, not a marketing page. The system
+   is about time pressure — a freed slot is held while exactly one person
+   decides, and the clock is running. So colour carries domain meaning and
+   nothing else:
+
+     cyan   = open        (available, calm)
+     amber  = held        (in flight — someone is deciding; this is the only
+                           thing on screen that moves, deliberately)
+     green  = confirmed   (settled)
+     red    = expired     (the deadline won)
+
+   Numbers and times are always monospace with tabular figures so digits do not
+   jitter as a countdown ticks. That single choice does more for the "built by
+   someone who does this professionally" feel than any amount of gradient.
+   =========================================================================== */
+
+:root {
+  /* Canvas — near-black with a cool cast, not flat grey. */
+  --bg: #07080b;
+  --panel: #0e1015;
+  --panel-2: #14171f;
+  --panel-3: #191d26;
+
+  --line: #1c202a;
+  --line-bright: #2b313d;
+
+  --text: #e9edf4;
+  --muted: #8b95a7;
+  --dim: #5a6474;
+
+  /* Domain signal colours. */
+  --cyan: #3ec9f0;
+  --cyan-dim: #12313d;
+  --amber: #f5b544;
+  --amber-dim: #3a2c11;
+  --green: #3ddc97;
+  --green-dim: #113329;
+  --red: #fb6f7d;
+  --red-dim: #3a1720;
+
+  --radius: 12px;
+  --radius-sm: 8px;
+
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas,
+    'Liberation Mono', monospace;
+  --sans: 'Inter var', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    Roboto, 'Helvetica Neue', sans-serif;
+
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  min-height: 100vh;
+}
+
+/* Two very soft light sources, so the canvas has depth without a "gradient
+   hero" look. Fixed so they do not travel while scrolling. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(900px 500px at 12% -8%, rgba(62, 201, 240, 0.06), transparent 70%),
+    radial-gradient(700px 460px at 92% 4%, rgba(245, 181, 68, 0.05), transparent 70%);
+}
+
+/* Faint engineering grid. Sub-1% opacity — you should feel it, not see it. */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.016) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.016) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(ellipse 100% 60% at 50% 0%, #000 40%, transparent 100%);
+}
+
+::selection {
+  background: rgba(62, 201, 240, 0.28);
+}
+
+/* ---------------------------------------------------------------- controls */
+
+button {
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-bright);
+  background: linear-gradient(180deg, var(--panel-3), var(--panel-2));
+  color: var(--text);
+  padding: 7px 13px;
+  transition: border-color 0.15s var(--ease), transform 0.1s var(--ease),
+    background 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+button:hover:not(:disabled) {
+  border-color: #3d4658;
+  background: linear-gradient(180deg, #1f242e, var(--panel-3));
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: linear-gradient(180deg, #4ad2f5, #1ba8d0);
+  border-color: #5fd8f7;
+  color: #04222c;
+  font-weight: 650;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.22) inset,
+    0 4px 14px rgba(62, 201, 240, 0.22);
+}
+
+button.primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, #62dbfa, #23b6df);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.28) inset,
+    0 6px 20px rgba(62, 201, 240, 0.34);
+}
+
+/* The claim button sits under a running clock — it should read as urgent. */
+button.claim {
+  background: linear-gradient(180deg, #ffc85c, #e39a1b);
+  border-color: #ffd479;
+  color: #2e1d02;
+  font-weight: 650;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.28) inset,
+    0 4px 14px rgba(245, 181, 68, 0.26);
+}
+
+button.claim:hover:not(:disabled) {
+  background: linear-gradient(180deg, #ffd47a, #f0a825);
+}
+
+button.danger {
+  border-color: #4a2530;
+  color: #ff9ba6;
+  background: linear-gradient(180deg, #1d1419, #171015);
+}
+
+button.danger:hover:not(:disabled) {
+  border-color: var(--red);
+  background: linear-gradient(180deg, #2a1a20, #1d1419);
+}
+
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--dim);
+  padding: 5px 9px;
+}
+
+button.ghost:hover:not(:disabled) {
+  background: var(--panel-2);
+  color: var(--text);
+  border-color: var(--line);
+}
+
+select,
+input {
+  font: inherit;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+select:hover,
+input:hover {
+  border-color: #3d4658;
+}
+
+/* One consistent focus treatment everywhere, keyboard-only. */
+:where(button, select, input, a):focus-visible {
+  outline: none;
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 3px rgba(62, 201, 240, 0.22);
+}
+
+/* ------------------------------------------------------------------ shell */
+
+.app {
+  position: relative;
+  z-index: 1;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 0 24px 64px;
+}
+
+/* ----------------------------------------------------------------- header */
+
+header.top {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 18px 0 16px;
+  margin-bottom: 22px;
+  background: rgba(7, 8, 11, 0.82);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+/* Mark: two slots, one filling. Drawn in CSS — no asset, no icon library. */
+.mark {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: linear-gradient(145deg, #16202a, #0d1319);
+  border: 1px solid #253442;
+  display: grid;
+  place-items: center;
+  flex: none;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+}
+
+.mark i {
+  position: absolute;
+  display: block;
+  width: 4px;
+  border-radius: 2px;
+  background: var(--cyan);
+}
+
+.mark i:nth-child(1) {
+  height: 9px;
+  transform: translate(-6px, -3px);
+  opacity: 0.55;
+}
+
+.mark i:nth-child(2) {
+  height: 15px;
+  transform: translate(0, 0);
+  background: var(--amber);
+  box-shadow: 0 0 9px rgba(245, 181, 68, 0.65);
+}
+
+.mark i:nth-child(3) {
+  height: 9px;
+  transform: translate(6px, 3px);
+  opacity: 0.55;
+}
+
+header.top h1 {
+  font-size: 17px;
+  font-weight: 640;
+  margin: 0;
+  letter-spacing: -0.32px;
+}
+
+header.top .tag {
+  color: var(--dim);
+  font-size: 12px;
+  font-family: var(--mono);
+  letter-spacing: -0.1px;
+  padding-left: 16px;
+  border-left: 1px solid var(--line-bright);
+}
+
+/* Connection pill. Green + breathing when live, red and still when not. */
+.live {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--muted);
+  padding: 5px 11px 5px 9px;
+  border: 1px solid var(--line-bright);
+  border-radius: 999px;
+  background: var(--panel);
+}
+
+.live.on {
+  color: var(--green);
+  border-color: #1d4536;
+  background: rgba(61, 220, 151, 0.07);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 0 3px var(--red-dim);
+  flex: none;
+}
+
+.live.on .dot {
+  background: var(--green);
+  box-shadow: 0 0 0 3px var(--green-dim);
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 3px var(--green-dim); }
+  50% { opacity: 0.7; box-shadow: 0 0 0 5px rgba(61, 220, 151, 0.1); }
+}
+
+/* ---------------------------------------------------------------- metrics */
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.metric {
+  position: relative;
+  background: linear-gradient(180deg, var(--panel), #0b0d12);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 13px 15px 14px;
+  overflow: hidden;
+  transition: border-color 0.2s var(--ease), transform 0.2s var(--ease);
+}
+
+.metric:hover {
+  border-color: var(--line-bright);
+  transform: translateY(-1px);
+}
+
+/* Accent hairline along the top edge, tinted per tile. */
+.metric::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--tint, var(--line-bright)), transparent);
+  opacity: 0.85;
+}
+
+.metric.tint-cyan { --tint: var(--cyan); }
+.metric.tint-amber { --tint: var(--amber); }
+.metric.tint-green { --tint: var(--green); }
+.metric.tint-red { --tint: var(--red); }
+
+.metric .label {
+  color: var(--dim);
+  font-size: 10px;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+}
+
+.metric .value {
+  font-size: 27px;
+  font-weight: 620;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -1.1px;
+  margin-top: 5px;
+  line-height: 1.1;
+  color: var(--tint, var(--text));
+}
+
+.metric .note {
+  color: var(--muted);
+  font-size: 11.5px;
+  margin-top: 4px;
+}
+
+/* ---------------------------------------------------------------- columns */
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.18fr) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
+@media (max-width: 1040px) {
+  .columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 620px) {
+  .app {
+    padding: 0 14px 48px;
+  }
+  header.top .tag {
+    display: none;
+  }
+}
+
+/* ----------------------------------------------------------------- panels */
+
+.panel {
+  background: linear-gradient(180deg, var(--panel), #0b0d12);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.panel > header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 14px 16px 0;
+}
+
+.panel h2 {
+  font-size: 13px;
+  font-weight: 620;
+  margin: 0;
+  letter-spacing: -0.15px;
+}
+
+/* Small monospace counter beside a panel title. */
+.panel .count {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-variant-numeric: tabular-nums;
+}
+
+.panel .hint {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 5px 16px 0;
+  max-width: 62ch;
+}
+
+.panel .body {
+  padding: 14px 16px 16px;
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.controls select,
+.controls input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------ slot grid */
+
+.slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(146px, 1fr));
+  gap: 10px;
+}
+
+.slot {
+  position: relative;
+  border: 1px solid var(--line-bright);
+  border-radius: 10px;
+  padding: 11px 12px 12px;
+  background: linear-gradient(180deg, var(--panel-2), #101319);
+  overflow: hidden;
+  transition: transform 0.16s var(--ease), border-color 0.16s var(--ease),
+    box-shadow 0.16s var(--ease);
+}
+
+.slot:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+}
+
+/* Status stripe down the left edge — the fastest read on the grid. */
+.slot::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--slot-tint, var(--dim));
+}
+
+.slot .range {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.3px;
+}
+
+.slot .state {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 3px 0 9px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.slot button {
+  width: 100%;
+  padding: 5px;
+  font-size: 12px;
+}
+
+.slot.open {
+  --slot-tint: var(--cyan);
+  border-style: dashed;
+  border-color: #243642;
+  background: transparent;
+}
+
+.slot.open:hover {
+  border-color: var(--cyan);
+}
+
+.slot.booked {
+  --slot-tint: var(--green);
+  border-color: #1c3b30;
+}
+
+/* The in-flight state. The only thing on the page that animates on its own —
+   because it is the only thing with a deadline attached. */
+.slot.held {
+  --slot-tint: var(--amber);
+  border-color: #4a3a17;
+  background: linear-gradient(180deg, #221c10, #16130c);
+  animation: held-pulse 2s ease-in-out infinite;
+}
+
+@keyframes held-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 181, 68, 0.16); }
+  50% { box-shadow: 0 0 0 4px rgba(245, 181, 68, 0.045); }
+}
+
+/* -------------------------------------------------------------------- rows */
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.row .who {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.row .meta {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-family: var(--mono);
+  letter-spacing: -0.2px;
+  margin-top: 2px;
+}
+
+.row .grow {
+  min-width: 0;
+  flex: 1;
+}
+
+/* A live offer is the hero row: tinted, inset, and it arrives with motion. */
+.row.live-offer {
+  background: linear-gradient(90deg, rgba(245, 181, 68, 0.09), transparent 72%);
+  border: 1px solid #4a3a17;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
+  animation: offer-in 0.42s var(--ease) both;
+}
+
+@keyframes offer-in {
+  from { opacity: 0; transform: translateY(-7px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ------------------------------------------------------------ countdown ring */
+
+.ring {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  flex: none;
+}
+
+.ring svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.ring .track {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 3.5;
+}
+
+.ring .arc {
+  fill: none;
+  stroke: var(--amber);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.95s linear, stroke 0.3s var(--ease);
+  filter: drop-shadow(0 0 5px rgba(245, 181, 68, 0.55));
+}
+
+/* Under ten seconds the ring turns red and the whole dial ticks. */
+.ring.urgent .arc {
+  stroke: var(--red);
+  filter: drop-shadow(0 0 6px rgba(251, 111, 125, 0.6));
+}
+
+.ring.urgent {
+  animation: tick 1s steps(1) infinite;
+}
+
+@keyframes tick {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.62; }
+}
+
+.ring .digits {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.4px;
+  color: var(--amber);
+}
+
+.ring.urgent .digits {
+  color: var(--red);
+}
+
+/* ------------------------------------------------------------------ badges */
+
+.badge {
+  font-size: 9.5px;
+  font-family: var(--mono);
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-bright);
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex: none;
+}
+
+.badge.waiting { color: var(--cyan); border-color: var(--cyan-dim); background: rgba(62, 201, 240, 0.07); }
+.badge.offered,
+.badge.pending { color: var(--amber); border-color: #4a3a17; background: rgba(245, 181, 68, 0.07); }
+.badge.converted,
+.badge.claimed { color: var(--green); border-color: #1d4536; background: rgba(61, 220, 151, 0.07); }
+.badge.expired,
+.badge.exhausted,
+.badge.cancelled,
+.badge.withdrawn { color: var(--red); border-color: #4a2530; background: rgba(251, 111, 125, 0.07); }
+
+/* Attempt counter — the cascade, made visible. */
+.attempt {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.5px;
+  color: var(--amber);
+  border: 1px solid #4a3a17;
+  background: rgba(245, 181, 68, 0.08);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.attempt.first {
+  color: var(--dim);
+  border-color: var(--line-bright);
+  background: var(--panel-2);
+}
+
+.prio {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.5px;
+  color: #ffd479;
+  border: 1px solid #4a3a17;
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-left: 7px;
+  vertical-align: 1px;
+}
+
+/* Queue position. The whole point of the waitlist panel is that this number
+   does NOT follow join order - a priority customer outranks someone who
+   arrived earlier, and seeing "1" next to them says that before any text does. */
+.queue-pos {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+  width: 22px;
+  height: 22px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-bright);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+
+/* -------------------------------------------------------------------- feed */
+
+/* The event tape. Monospace, dense, newest at the top, each line flashing as
+   it lands. This panel is the best explanation of the system on the page. */
+.feed {
+  max-height: 380px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  margin: 0 -4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-bright) transparent;
+}
+
+.feed::-webkit-scrollbar {
+  width: 8px;
+}
+
+.feed::-webkit-scrollbar-thumb {
+  background: var(--line-bright);
+  border-radius: 4px;
+}
+
+.feed .line {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 5px 6px;
+  border-radius: 5px;
+  border-bottom: 1px solid rgba(28, 32, 42, 0.7);
+  animation: land 0.5s var(--ease) both;
+}
+
+@keyframes land {
+  from { opacity: 0; transform: translateX(-8px); background: rgba(62, 201, 240, 0.1); }
+  to { opacity: 1; transform: none; background: transparent; }
+}
+
+.feed .line:hover {
+  background: var(--panel-2);
+}
+
+.feed .ts {
+  color: var(--dim);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Coloured leading glyph per event family — scannable at a glance. */
+.feed .glyph {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--dim);
+}
+
+.feed .type {
+  font-weight: 600;
+  letter-spacing: -0.2px;
+}
+
+.type-slot { color: var(--cyan); }
+.type-slot ~ .glyph, .line.slot .glyph { background: var(--cyan); }
+.type-offer { color: var(--amber); }
+.line.offer .glyph { background: var(--amber); }
+.type-booking { color: var(--green); }
+.line.booking .glyph { background: var(--green); }
+.type-waitlist { color: var(--red); }
+.line.waitlist .glyph { background: var(--red); }
+
+/* ------------------------------------------------------------------ inbox */
+
+.inbox-item {
+  border-bottom: 1px solid var(--line);
+  padding: 11px 0;
+}
+
+.inbox-item:last-child {
+  border-bottom: none;
+}
+
+.inbox-item .subject {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.inbox-item .body {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+.inbox-item .to {
+  color: var(--dim);
+  font-size: 10.5px;
+  font-family: var(--mono);
+  margin-top: 5px;
+}
+
+/* ------------------------------------------------------------ empty states */
+
+/* Empty is not an error — it is an instruction. */
+.empty {
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 26px 16px;
+  text-align: center;
+  border: 1px dashed var(--line-bright);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.empty strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+
+.section-label {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--dim);
+  margin: 18px 0 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+/* ------------------------------------------------------- pipeline flow */
+
+.flow {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  padding: 6px 2px 30px;
+  position: relative;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.flow::-webkit-scrollbar {
+  display: none;
+}
+
+.flow-step {
+  display: flex;
+  align-items: center;
+  flex: 1 1 0;
+  min-width: 0;
+  position: relative;
+  flex-wrap: wrap;
+}
+
+.node {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-bright);
+  background: var(--panel-2);
+  display: grid;
+  place-items: center;
+  flex: none;
+  transition: border-color 0.25s var(--ease), box-shadow 0.25s var(--ease);
+}
+
+.node-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--dim);
+  transition: background 0.25s var(--ease), transform 0.25s var(--ease);
+}
+
+.node.tint-red { --c: var(--red); }
+.node.tint-cyan { --c: var(--cyan); }
+.node.tint-amber { --c: var(--amber); }
+.node.tint-green { --c: var(--green); }
+
+/* --heat runs 1 -> 0 as the event ages, so a node fades rather than snapping
+   off. Opacity is driven from the same number the JS computes. */
+.node.hot {
+  border-color: var(--c);
+  box-shadow: 0 0 calc(12px * var(--heat, 0)) rgba(255, 255, 255, 0.05),
+    0 0 0 calc(3px * var(--heat, 0)) color-mix(in srgb, var(--c) 22%, transparent);
+}
+
+.node.hot .node-dot {
+  background: var(--c);
+  transform: scale(calc(1 + 0.5 * var(--heat, 0)));
+}
+
+.node-label {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: -0.1px;
+  color: var(--dim);
+  position: absolute;
+  top: 21px;
+  left: 0;
+  white-space: nowrap;
+  transition: color 0.25s var(--ease);
+}
+
+.node-label.hot {
+  color: var(--text);
+}
+
+.wire {
+  flex: 1 1 auto;
+  height: 1.5px;
+  background: var(--line-bright);
+  margin: 0 7px;
+  position: relative;
+  min-width: 18px;
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+/* A packet travels the wire when the stage upstream of it fires. */
+.packet {
+  position: absolute;
+  top: -1px;
+  left: -18%;
+  width: 18%;
+  height: 3.5px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+  opacity: 0;
+}
+
+.wire.hot .packet {
+  animation: travel 0.85s var(--ease);
+}
+
+@keyframes travel {
+  0% { left: -18%; opacity: 0; }
+  15% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { left: 100%; opacity: 0; }
+}
+
+/* The return path. This is the cascade, and it is drawn differently from the
+   forward steps on purpose - it goes backwards. */
+.cascade-arc {
+  position: absolute;
+  left: 22%;
+  right: 26%;
+  bottom: 4px;
+  height: 15px;
+  border: 1.5px dashed var(--line-bright);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+  transition: border-color 0.3s var(--ease);
+}
+
+.cascade-arc::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 0;
+  border: 5px solid transparent;
+  border-bottom-color: var(--line-bright);
+  transform: translate(-42%, -78%);
+  transition: border-bottom-color 0.3s var(--ease);
+}
+
+.arc-label {
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  transform: translate(-50%, 1px);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.3px;
+  color: var(--dim);
+  white-space: nowrap;
+  transition: color 0.3s var(--ease);
+}
+
+.cascade-arc.hot {
+  border-color: var(--amber);
+  animation: arc-flash 0.9s var(--ease);
+}
+
+.cascade-arc.hot::before {
+  border-bottom-color: var(--amber);
+}
+
+.cascade-arc.hot .arc-label {
+  color: var(--amber);
+}
+
+@keyframes arc-flash {
+  0%, 100% { box-shadow: none; }
+  40% { box-shadow: 0 4px 16px rgba(245, 181, 68, 0.22); }
+}
+
+/* ------------------------------------------------------------ race panel */
+
+/* Segmented control for the racer count. */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  flex: none;
+}
+
+.seg button {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 7px 13px;
+  color: var(--muted);
+}
+
+.seg button + button {
+  border-left: 1px solid var(--line-bright);
+}
+
+.seg button.on {
+  background: var(--panel-3);
+  color: var(--cyan);
+  font-weight: 650;
+}
+
+.race-target {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+  align-self: center;
+}
+
+.race-note {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0;
+}
+
+.race-note code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--cyan);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+/* One square per racer. They all flip at once - that simultaneity is the
+   whole visual argument. */
+.grid-race {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15px, 1fr));
+  gap: 4px;
+  margin: 4px 0 14px;
+}
+
+.racer {
+  aspect-ratio: 1;
+  border-radius: 3px;
+  background: var(--panel-3);
+  border: 1px solid var(--line-bright);
+  transition: background 0.25s var(--ease), border-color 0.25s var(--ease),
+    transform 0.25s var(--ease);
+}
+
+.racer.inflight {
+  animation: inflight 0.9s ease-in-out infinite;
+}
+
+@keyframes inflight {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.9; }
+}
+
+.racer.taken {
+  background: rgba(251, 111, 125, 0.12);
+  border-color: #4a2530;
+}
+
+.racer.error {
+  background: rgba(245, 181, 68, 0.14);
+  border-color: #4a3a17;
+}
+
+/* The winner. Deliberately loud - it is the point of the whole exercise. */
+.racer.won {
+  background: var(--green);
+  border-color: #7bf0c0;
+  transform: scale(1.28);
+  box-shadow: 0 0 16px rgba(61, 220, 151, 0.75);
+  animation: winner 0.6s var(--ease);
+}
+
+@keyframes winner {
+  0% { transform: scale(0.6); }
+  55% { transform: scale(1.6); }
+  100% { transform: scale(1.28); }
+}
+
+.verdict {
+  border: 1px solid var(--line-bright);
+  border-radius: 10px;
+  padding: 11px 13px;
+  background: var(--panel-2);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.verdict.pass {
+  border-color: #1d4536;
+  background: linear-gradient(90deg, rgba(61, 220, 151, 0.08), transparent 70%);
+}
+
+.verdict.fail {
+  border-color: #4a2530;
+  background: linear-gradient(90deg, rgba(251, 111, 125, 0.09), transparent 70%);
+}
+
+.v-headline {
+  font-size: 14px;
+  font-weight: 640;
+  letter-spacing: -0.2px;
+}
+
+.verdict.pass .v-headline {
+  color: var(--green);
+}
+
+.verdict.fail .v-headline {
+  color: var(--red);
+}
+
+.v-detail,
+.v-run {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.v-detail b {
+  font-weight: 650;
+}
+
+.v-detail .ok { color: var(--green); }
+.v-detail .rej { color: var(--red); }
+.v-detail .err { color: var(--amber); }
+
+/* ------------------------------------------------------------------- toast */
+
+.toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 50;
+  background: var(--panel-2);
+  border: 1px solid var(--line-bright);
+  border-left: 3px solid var(--red);
+  padding: 11px 15px;
+  border-radius: 10px;
+  max-width: 360px;
+  font-size: 13px;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.6);
+  animation: toast-in 0.28s var(--ease) both;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ------------------------------------------------- accessibility / motion */
+
+/* Everything above that moves is decorative. If the viewer asked for less
+   motion, none of it is load-bearing, so all of it goes. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

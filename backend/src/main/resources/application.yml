@@ -1,0 +1,94 @@
+spring:
+  application:
+    name: slotsync
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/slotsync}
+    username: ${SPRING_DATASOURCE_USERNAME:slotsync}
+    password: ${SPRING_DATASOURCE_PASSWORD:slotsync}
+    hikari:
+      maximum-pool-size: 20
+      pool-name: slotsync-pool
+
+  jpa:
+    open-in-view: false          # never hold a DB connection for the whole HTTP request
+    hibernate:
+      ddl-auto: validate         # Flyway owns the schema; Hibernate only checks it matches
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        format_sql: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  data:
+    redis:
+      url: ${SPRING_DATA_REDIS_URL:redis://localhost:6379}
+      timeout: 2s
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all                  # wait for all in-sync replicas: no silent event loss
+      retries: 5
+      properties:
+        enable.idempotence: true # broker de-duplicates producer retries
+        max.in.flight.requests.per.connection: 5
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      group-id: slotsync-core
+      auto-offset-reset: earliest
+      enable-auto-commit: false  # the offset is committed after the handler succeeds
+    listener:
+      ack-mode: record
+
+  jackson:
+    default-property-inclusion: non_null
+
+server:
+  port: 8080
+  shutdown: graceful             # finish in-flight requests before the process dies
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.slotsync: INFO
+    org.apache.kafka: WARN
+
+# ---------------------------------------------------------------------------
+# Application-specific knobs. Everything tunable lives here, nothing is
+# hard-coded in the Java.
+# ---------------------------------------------------------------------------
+slotsync:
+  offer:
+    ttl-seconds: ${SLOTSYNC_OFFER_TTL_SECONDS:300}
+    max-missed-offers: ${SLOTSYNC_MAX_MISSED_OFFERS:2}
+  sweeper:
+    interval-ms: 2000            # how often we look for expired offers
+    batch-size: 50               # rows claimed per tick, per instance
+  outbox:
+    interval-ms: 500             # how often unpublished events are relayed to Kafka
+    batch-size: 100
+    max-attempts: 8              # after this the event goes to the dead-letter table
+  ratelimit:
+    enabled: true
+    capacity: ${SLOTSYNC_RATELIMIT_CAPACITY:120}
+    refill-per-second: ${SLOTSYNC_RATELIMIT_REFILL_PER_SECOND:20}
+  events:
+    topic: slotsync.events
+    dlt-topic: slotsync.events.DLT
+    transport: kafka             # `kafka` in production, `inmemory` for tests
