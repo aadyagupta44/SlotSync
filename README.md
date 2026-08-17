@@ -14,6 +14,33 @@ the slot **cascades** to the next person automatically — no staff phone calls,
 
 ---
 
+## Live demo
+
+**https://slotsync-frontend.onrender.com**
+
+Pick a booked slot, hit **Cancel**, and watch the waitlist engine take over: the slot turns amber
+(held), an offer appears for the priority customer with a countdown, and if nobody claims it the
+offer expires and cascades to the next person by itself. The **Prove it** panel fires N simultaneous
+bookings at one open slot so you can watch the exclusion constraint reject all but one.
+
+A few things worth knowing before you click:
+
+- **It is unauthenticated, on purpose.** The tenant comes from an `X-Tenant-Slug` header, so anyone
+  with the link can cancel bookings and edit the waitlist — the demo data is shared and disposable.
+  Authentication is the first item under [Deliberately out of scope](#deliberately-out-of-scope);
+  a real deployment puts JWT/OIDC in front of exactly the same code.
+- **The first request may take up to a minute.** The backend runs on a free tier that sleeps when
+  idle, and a JVM cold start is not fast. Subsequent requests are immediate.
+- **The hosted demo runs the in-memory event transport, not Kafka.** `EventTransport` has a Kafka
+  implementation and an in-memory one selected by `slotsync.events.transport`; free managed Kafka is
+  no longer readily available, so the deployment uses the latter. The Kafka path is what runs in
+  `docker compose` locally and in CI. Everything else — the outbox, the consumer de-duplication, the
+  cascade — is identical either way.
+
+Running it locally with `docker compose up` gives you the full stack, Kafka included.
+
+---
+
 ## Why it is interesting
 
 The product is simple to describe. The hard part is that it is a **concurrency and timing problem**:
@@ -156,10 +183,28 @@ loadtest/         k6 concurrency proof
 
 ## Deploying
 
-Built for a free-tier split: **Neon** (Postgres) · **Upstash** (Redis + Kafka) · **Railway** or
-**Fly.io** (backend) · **Vercel** (frontend). Everything is configured by environment variable —
-see `.env.example`. The backend is stateless, so scaling it is changing the replica count; all
-coordination already lives in Postgres and Redis.
+Everything is configured by environment variable — see `.env.example`. The backend is stateless, so
+scaling it is changing the replica count; all coordination already lives in Postgres and Redis.
+
+The live demo above runs on a free-tier split:
+
+| Piece | Service | Notes |
+|---|---|---|
+| Postgres | **Neon** | Flyway migrates and seeds on first boot |
+| Redis | **Render Key Value** | required — SSE fan-out goes through Redis pub/sub, even on one instance |
+| Backend | **Render** web service, `backend/Dockerfile` | sleeps when idle on the free plan |
+| Frontend | **Render** static site | `VITE_API_BASE_URL` is baked in at build time |
+| Kafka | *not deployed* | `SLOTSYNC_EVENTS_TRANSPORT=inmemory`; see the demo notes above |
+
+Two things that are easy to get wrong:
+
+- **Use Neon's direct endpoint, not the `-pooler` one.** Flyway guards migrations with a PostgreSQL
+  advisory lock, and advisory locks are session-scoped — they do not survive PgBouncer's transaction
+  pooling. Also drop `channel_binding` from the URL; that is a libpq parameter the JDBC driver does
+  not accept.
+- **`VITE_*` variables are substituted at build time, not read at runtime.** A host dashboard
+  variable overrides `frontend/.env.production`, so a stale or placeholder value there silently
+  produces a bundle that calls its own origin and 404s on every request.
 
 ---
 
