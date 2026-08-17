@@ -59,6 +59,15 @@ public class BookingService {
                 .orElseThrow(() -> ApiException.notFound("Customer"));
         Instant endsAt = availabilityService.slotEndFor(resource, startsAt);
 
+        // Queue behind any other request for this exact slot before touching the
+        // bookings table. Without this, concurrent inserts contend on the GiST
+        // exclusion index in inconsistent orders, deadlock, and get aborted a
+        // second later - at high contention every contender loses and a free
+        // slot goes unbooked. See BookingRepository.lockSlotForBooking.
+        //
+        // The constraint, not this lock, is still what guarantees correctness.
+        bookingRepository.lockSlotForBooking(resourceId + "@" + startsAt);
+
         Booking booking = new Booking();
         booking.setTenantId(tenantId);
         booking.setResourceId(resourceId);

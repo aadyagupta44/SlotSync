@@ -17,6 +17,34 @@ public interface BookingRepository extends JpaRepository<Booking, UUID> {
     Optional<Booking> findByIdAndTenantId(UUID id, UUID tenantId);
 
     /**
+     * Queue behind anyone else trying to book this exact slot right now.
+     *
+     * <p><b>This does not provide the no-double-booking guarantee</b> — the
+     * {@code bookings_no_overlap} exclusion constraint does, and it still
+     * decides every outcome. This exists purely to fix a throughput collapse.
+     *
+     * <p>Concurrent inserts of overlapping ranges contend on the GiST index
+     * itself, and they can acquire index locks in different orders. That forms
+     * genuine deadlock cycles, which Postgres only breaks after
+     * {@code deadlock_timeout} (one second by default), aborting contenders. At
+     * 60-way contention every single contender was aborted — a free slot was
+     * reported as taken to all of them and stayed empty — and each attempt held
+     * a connection for a second while it happened, saturating the pool.
+     *
+     * <p>An advisory lock keyed on the slot removes the cycle: every contender
+     * waits on <b>one</b> lock taken in <b>one</b> order, so they queue in
+     * microseconds rather than deadlocking for a second. The winner inserts and
+     * commits; the next in line then hits the exclusion constraint immediately
+     * and gets a clean 409. Same guarantee, same answer, no lock convoy.
+     *
+     * <p>{@code pg_advisory_xact_lock} releases automatically when the
+     * transaction ends, so there is no unlock to forget. Different slots hash to
+     * different keys and proceed in parallel.
+     */
+    @Query(value = "select pg_advisory_xact_lock(hashtext(:slotKey))", nativeQuery = true)
+    void lockSlotForBooking(@Param("slotKey") String slotKey);
+
+    /**
      * Everything that occupies part of a time window on one resource.
      * Used to paint the availability grid.
      *
